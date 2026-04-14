@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Animation Saturne</title>
+
+    <style>
+        body {
+            background: black;
+            margin: 0;
+            overflow: hidden;
+            color: white;
+            font-family: Arial;
+        }
+        #vitesse {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Slider de vitesse -->
+    <input type="range" id="vitesse" min="1" max="200" value="50">
+
+    <!-- Canvas -->
+    <canvas id="canvas"></canvas>
+
+    <script src="script.js"></script>
+</body>
+</html>

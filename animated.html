@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Animation 3D - Orbite CSV</title>
+  <style>
+    html,body { height:100%; margin:0; background:#111; color:#eee; font-family:Arial,Helvetica,sans-serif; }
+    #ui { position: absolute; left:12px; top:12px; z-index:5; background: rgba(0,0,0,0.5); padding:10px; border-radius:6px; }
+    #canvas-container { width:100%; height:100%; display:block; }
+    input, button { margin:6px 0; display:block; }
+    .hint { font-size:12px; color:#bbb; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <strong>Charger CSV (colonnes x,y)</strong>
+    <input id="fileInput" type="file" accept=".csv" />
+    <label>
+      Échelle (m → unité affichée): <input id="scale" type="number" value="1e9" step="1e8" />
+    </label>
+    <label>
+      Pas d'échantillonnage (prendre 1 point sur N) : <input id="sample" type="number" value="1" min="1" />
+    </label>
+    <button id="startBtn" disabled>Charger et lancer</button>
+    <div class="hint">Conseil : utilisez une échelle (par ex. 1e9) pour rendre visible l'orbite.</div>
+  </div>
+
+  <div id="canvas-container"></div>
+
+  <!-- Three.js & helpers -->
+  <script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.158.0/examples/js/controls/OrbitControls.js"></script>
+  <!-- PapaParse pour lire CSV -->
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <script>
+  // Références UI
+  const fileInput = document.getElementById('fileInput');
+  const startBtn = document.getElementById('startBtn');
+  const scaleInput = document.getElementById('scale');
+  const sampleInput = document.getElementById('sample');
+
+  let csvData = null;
+
+  fileInput.addEventListener('change', (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    Papa.parse(f, {
+      header: true,
+      dynamicTyping: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        csvData = results.data;
+        console.log("CSV chargé :", csvData.length, "lignes");
+        startBtn.disabled = false;
+      },
+      error: (err) => {
+        alert("Erreur CSV: " + err);
+      }
+    });
+  });
+
+  startBtn.addEventListener('click', () => {
+    if (!csvData) return alert("Charge un CSV d'abord.");
+    const scale = Number(scaleInput.value) || 1e9;
+    const sample = Math.max(1, Math.floor(Number(sampleInput.value) || 1));
+    // Convertir et échantillonner les points
+    const pts = [];
+    for (let i = 0; i < csvData.length; i += sample) {
+      const row = csvData[i];
+      // Supporte 'x' et 'y' ou 'X'/'Y' (insensible à la casse)
+      const keys = Object.keys(row);
+      const kx = keys.find(k => k.toLowerCase() === 'x');
+      const ky = keys.find(k => k.toLowerCase() === 'y');
+      if (!kx || !ky) { alert("Le CSV doit contenir des colonnes 'x' et 'y'."); return; }
+      const x = row[kx];
+      const y = row[ky];
+      if (typeof x !== 'number' || typeof y !== 'number') continue;
+      pts.push([x/scale, y/scale, 0]); // z=0
+    }
+    if (pts.length < 2) return alert("Pas assez de points valides dans le CSV.");
+    initThree(pts);
+    startBtn.disabled = true;
+  });
+
+  // --- Three.js scene ---
+  let renderer, scene, camera, controls;
+  let orbitLine, movingSphere;
+  let positionsArray = [];
+  let playIndex = 0;
+  let totalFrames = 0;
+  let lastTime = 0;
+  let speed = 1; // points per frame, modifiable
+
+  function initThree(points) {
+    // nettoyer s'il y avait déjà une scène
+    const container = document.getElementById('canvas-container');
+    container.innerHTML = '';
+
+    // renderer
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio ? window.devicePixelRatio : 1);
+    container.appendChild(renderer.domElement);
+
+    // scene & camera
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x05050a);
+    camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1e6);
+    camera.position.set(0, -points.length>0 ? Math.max(...points.map(p=>Math.hypot(p[0],p[1])))*1.5 : 1e6, 0.5);
+
+    // controls
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // Axes helper (optionnel)
+    const axes = new THREE.AxesHelper(1);
+    scene.add(axes);
+
+    // Soleil (jaune sphere au centre)
+    const sunGeom = new THREE.SphereGeometry(0.3, 24, 24);
+    const sunMat = new THREE.MeshBasicMaterial({ color: 0xFFFF66, emissive: 0xFFFF44 });
+    const sun = new THREE.Mesh(sunGeom, sunMat);
+    sun.position.set(0,0,0);
+    scene.add(sun);
+
+    // Trajectoire : convert points to BufferGeometry
+    positionsArray = new Float32Array(points.length * 3);
+    for (let i=0;i<points.length;i++){
+      positionsArray[3*i]   = points[i][0];
+      positionsArray[3*i+1] = points[i][1];
+      positionsArray[3*i+2] = points[i][2];
+    }
+    const trajGeom = new THREE.BufferGeometry();
+    trajGeom.setAttribute('position', new THREE.BufferAttribute(positionsArray, 3));
+    const trajMat = new THREE.LineBasicMaterial({ color: 0x66aaff, linewidth: 1 });
+    orbitLine = new THREE.Line(trajGeom, trajMat);
+    scene.add(orbitLine);
+
+    // point mobile (Saturne)
+    const satGeom = new THREE.SphereGeometry(0.08, 16, 16);
+    const satMat = new THREE.MeshPhongMaterial({ color: 0x8888ff, shininess: 60 });
+    movingSphere = new THREE.Mesh(satGeom, satMat);
+    scene.add(movingSphere);
+
+    // lumière
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(5,5,5);
+    scene.add(dirLight);
+    const amb = new THREE.AmbientLight(0x404050, 0.8);
+    scene.add(amb);
+
+    totalFrames = points.length;
+    playIndex = 0;
+
+    // adapt camera distance to orbit extent
+    const maxR = Math.max(...points.map(p => Math.hypot(p[0], p[1])));
+    camera.position.set(0, -maxR*1.5, maxR*0.6);
+    camera.lookAt(0,0,0);
+
+    // responsive resize
+    window.addEventListener('resize', () => {
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // start animation
+    lastTime = performance.now();
+    animate();
+  }
+
+  function animate(now) {
+    requestAnimationFrame(animate);
+    const dt = now - lastTime;
+    lastTime = now;
+
+    // avancer l'index en fonction d'un speed variable et du dt (smooth)
+    // ici on avance speed points par frame (speed = 1 par défaut)
+    playIndex += speed;
+    if (playIndex >= totalFrames) playIndex = 0; // boucle
+
+    // positioner la sphère au point courant (interpolation linéaire pour douceur)
+    const i0 = Math.floor(playIndex);
+    const i1 = (i0 + 1) % totalFrames;
+    const alpha = playIndex - i0;
+
+    const x0 = positionsArray[3*i0];
+    const y0 = positionsArray[3*i0+1];
+    const z0 = positionsArray[3*i0+2];
+    const x1 = positionsArray[3*i1];
+    const y1 = positionsArray[3*i1+1];
+    const z1 = positionsArray[3*i1+2];
+
+    movingSphere.position.set(
+      x0 * (1-alpha) + x1 * alpha,
+      y0 * (1-alpha) + y1 * alpha,
+      z0 * (1-alpha) + z1 * alpha
+    );
+
+    // petits effets : orienter caméra doucement vers la sphère (optionnel)
+    // controls.target.lerp(movingSphere.position, 0.02);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+
+  // Optionnel : gérer la molette pour vitesse
+  window.addEventListener('wheel', (e) => {
+    if (e.deltaY < 0) speed = Math.min(10, speed + 0.2);
+    else speed = Math.max(0.05, speed - 0.2);
+  });
+
+  </script>
+</body>
+</html>
